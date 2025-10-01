@@ -1,105 +1,197 @@
 name: Deploy
 
 on:
-  push:
-    branches: [ "main" ]
+    push:
+        branches: ["main"]
 
 jobs:
-  deploy:
-    runs-on: ubuntu-latest
+    deploy:
+        runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+            - name: Set up Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
 
-      - name: Lint (quick)
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          python -m compileall -q abcp_b24_garage_sync
+            - name: Lint (quick)
+              run: |
+                  python -m pip install --upgrade pip
+                  pip install -r requirements.txt
+                  python -m compileall -q abcp_b24_garage_sync
 
-      - name: Add SSH key
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+            - name: Add SSH key
+              uses: webfactory/ssh-agent@v0.9.0
+              with:
+                  ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-      - name: Add known_hosts
-        run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+            - name: Add known_hosts
+              run: |
+                  mkdir -p ~/.ssh
+                  ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
 
-      - name: Prepare remote folders
-        run: |
-          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "\
-            mkdir -p '${{ secrets.DEPLOY_PATH }}'/current '${{ secrets.DEPLOY_PATH }}'/shared '${{ secrets.DEPLOY_PATH }}'/data && \
-            (command -v rsync >/dev/null || (apt-get update -y && apt-get install -y rsync || yum install -y rsync || true)) \
-          "
+            # Готовим каталоги и базовые пакеты на сервере (rsync, python3, venv)
+            - name: Prepare remote folders & packages
+              run: |
+                  ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "\
+                    set -e; \
+                    mkdir -p '${{ secrets.DEPLOY_PATH }}'/current '${{ secrets.DEPLOY_PATH }}'/shared '${{ secrets.DEPLOY_PATH }}'/data; \
+                    (command -v rsync >/dev/null || (apt-get update -y && apt-get install -y rsync || yum install -y rsync || true)); \
+                    (command -v python3 >/dev/null || (apt-get update -y && apt-get install -y python3 || yum install -y python3 || true)); \
+                    (python3 -m venv >/dev/null 2>&1 || (apt-get update -y && apt-get install -y python3-venv || yum install -y python3-virtualenv || true)) \
+                  "
 
-      - name: Rsync project to server
-        run: |
-          rsync -az --delete \
-            --exclude ".git" \
-            --exclude ".github" \
-            --exclude ".env" \
-            --exclude "__pycache__" \
-            --rsync-path="mkdir -p '${{ secrets.DEPLOY_PATH }}'/current && rsync" \
-            ./ ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/current/
+            - name: Rsync project to server
+              run: |
+                  rsync -az --delete \
+                    --exclude ".git" \
+                    --exclude ".github" \
+                    --exclude ".env" \
+                    --exclude "__pycache__" \
+                    --rsync-path="mkdir -p '${{ secrets.DEPLOY_PATH }}'/current && rsync" \
+                    ./ ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/current/
 
-      - name: Ensure .env and permissions
-        run: |
-          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} bash -se <<'REMOTE'
-          set -euo pipefail
-          DEPLOY_PATH='${{ secrets.DEPLOY_PATH }}'
+            # Создаём .env, если отсутствует, и выставляем права
+            - name: Ensure .env and permissions
+              run: |
+                  ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} bash -se <<'REMOTE'
+                  set -euo pipefail
+                  DEPLOY_PATH='${{ secrets.DEPLOY_PATH }}'
 
-          mkdir -p "$DEPLOY_PATH/data" "$DEPLOY_PATH/current"
+                  mkdir -p "$DEPLOY_PATH/data" "$DEPLOY_PATH/current"
 
-          if [ ! -f "$DEPLOY_PATH/.env" ]; then
-            if [ -f "$DEPLOY_PATH/current/.env.example" ]; then
-              cp "$DEPLOY_PATH/current/.env.example" "$DEPLOY_PATH/.env"
-              echo "!!! Fill .env on server: $DEPLOY_PATH/.env"
-            else
-              echo "# .env created by CI — fill values" > "$DEPLOY_PATH/.env"
-              echo "!!! Created empty .env (no .env.example in repo)"
-            fi
-          fi
+                  if [ ! -f "$DEPLOY_PATH/.env" ]; then
+                    if [ -f "$DEPLOY_PATH/current/.env.example" ]; then
+                      cp "$DEPLOY_PATH/current/.env.example" "$DEPLOY_PATH/.env"
+                      echo "!!! Fill .env on server: $DEPLOY_PATH/.env"
+                    else
+                      echo "# .env created by CI — fill values" > "$DEPLOY_PATH/.env"
+                      echo "!!! Created empty .env (no .env.example in repo)"
+                    fi
+                  fi
 
-          chown -R '${{ secrets.DEPLOY_USER }}':'${{ secrets.DEPLOY_USER }}' "$DEPLOY_PATH" || true
-          REMOTE
+                  chown -R '${{ secrets.DEPLOY_USER }}':'${{ secrets.DEPLOY_USER }}' "$DEPLOY_PATH" || true
+                  REMOTE
 
-      - name: Install deps + prime venv
-        run: |
-          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} bash -se <<'REMOTE'
-          set -euo pipefail
-          DEPLOY_PATH='${{ secrets.DEPLOY_PATH }}'
-          VENV="$DEPLOY_PATH/venv"
+            # Страховочный шаг: создаём bin/sync.sh, если его нет (некоторые сервисы ссылаются именно на него)
+            - name: Ensure bin/sync.sh exists and is executable
+              run: |
+                  ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} bash -se <<'REMOTE'
+                  set -euo pipefail
+                  DEPLOY_PATH='${{ secrets.DEPLOY_PATH }}'
+                  APP_DIR="$DEPLOY_PATH/current"
+                  BIN_DIR="$APP_DIR/bin"
+                  VENV_DIR="$DEPLOY_PATH/venv"
+                  DB_DIR="$DEPLOY_PATH/data"
 
-          if [ ! -d "$VENV" ]; then
-            python3 -m venv "$VENV"
-          fi
+                  mkdir -p "$BIN_DIR" "$DB_DIR"
 
-          . "$VENV/bin/activate"
-          pip -q install --upgrade pip wheel
-          pip -q install -r "$DEPLOY_PATH/current/requirements.txt"
-          echo "venv ready"
-          REMOTE
+                  if [ ! -f "$BIN_DIR/sync.sh" ]; then
+                    cat >"$BIN_DIR/sync.sh" <<'EOSH'
+                    #!/usr/bin/env bash
+                    set -euo pipefail
 
-      - name: Install/Reload systemd units and enable timer
-        run: |
-          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} bash -se <<'REMOTE'
-          set -euo pipefail
-          DEPLOY_PATH='${{ secrets.DEPLOY_PATH }}'
+                    APP_DIR="/opt/abcp-b24-garage-sync/current"
+                    VENV_DIR="/opt/abcp-b24-garage-sync/venv"
+                    DB_DIR="/opt/abcp-b24-garage-sync/data"
 
-          bash "$DEPLOY_PATH/current/deploy/remote_bootstrap.sh" || true
-          sudo systemctl daemon-reload || true
-          sudo systemctl enable --now abcp-b24-garage-sync.timer || true
-          systemctl status abcp-b24-garage-sync.timer --no-pager || true
-          REMOTE
+                    mkdir -p "$DB_DIR"
 
-      - name: Trigger one manual run (optional smoke check)
-        run: |
-          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "sudo systemctl start abcp-b24-garage-sync.service || true"
+                    # venv
+                    if [[ ! -d "$VENV_DIR" ]]; then
+                    python3 -m venv "$VENV_DIR"
+                    fi
+                    source "$VENV_DIR/bin/activate"
+                    python -m ensurepip -U >/dev/null 2>&1 || true
+                    pip -q install --upgrade pip wheel
+                    pip -q install -r "$APP_DIR/requirements.txt"
+
+                    cd "$APP_DIR"
+
+                    # main.py уже подставляет дефолтный диапазон, так что можно без дат
+                    python3 -m abcp_b24_garage_sync.main
+                    EOSH
+                  fi
+
+                  chmod +x "$BIN_DIR/sync.sh"
+                  REMOTE
+
+            - name: Install deps + prime venv
+              run: |
+                  ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} bash -se <<'REMOTE'
+                  set -euo pipefail
+                  DEPLOY_PATH='${{ secrets.DEPLOY_PATH }}'
+                  VENV="$DEPLOY_PATH/venv"
+
+                  if [ ! -d "$VENV" ]; then
+                    python3 -m venv "$VENV"
+                  fi
+
+                  . "$VENV/bin/activate"
+                  python -m ensurepip -U >/dev/null 2>&1 || true
+                  pip -q install --upgrade pip wheel
+                  pip -q install -r "$DEPLOY_PATH/current/requirements.txt"
+                  echo "venv ready"
+                  REMOTE
+
+            # Устанавливаем/перезагружаем unit-файлы и включаем таймер
+            - name: Install/Reload systemd units and enable timer
+              run: |
+                  ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} bash -se <<'REMOTE'
+                  set -euo pipefail
+                  DEPLOY_PATH='${{ secrets.DEPLOY_PATH }}'
+
+                  # Если в репо есть свой скрипт — используем его, иначе системы ниже достаточно
+                  if [ -x "$DEPLOY_PATH/current/deploy/remote_bootstrap.sh" ]; then
+                    bash "$DEPLOY_PATH/current/deploy/remote_bootstrap.sh" || true
+                  else
+                    # Минимальные unit-файлы под root
+                    cat >/etc/systemd/system/abcp-b24-garage-sync.service <<'EOF_SERVICE'
+                    [Unit]
+                    Description=ABCP -> Bitrix24 Garage Sync (one-shot)
+                    Wants=network-online.target
+                    After=network-online.target
+
+                    [Service]
+                    Type=oneshot
+                    User=root
+                    Group=root
+                    WorkingDirectory=/opt/abcp-b24-garage-sync/current
+                    Environment=PYTHONUNBUFFERED=1
+                    ExecStart=/opt/abcp-b24-garage-sync/current/bin/sync.sh
+                    KillSignal=SIGINT
+                    TimeoutStartSec=900
+                    ReadOnlyPaths=/
+                    ReadWritePaths=/opt/abcp-b24-garage-sync
+                    NoNewPrivileges=true
+
+                    [Install]
+                    WantedBy=multi-user.target
+                    EOF_SERVICE
+
+                                cat >/etc/systemd/system/abcp-b24-garage-sync.timer <<'EOF_TIMER'
+                    [Unit]
+                    Description=Run ABCP -> Bitrix24 Garage Sync every 30 minutes
+
+                    [Timer]
+                    OnCalendar=*:0/30
+                    AccuracySec=1min
+                    Persistent=true
+                    Unit=abcp-b24-garage-sync.service
+
+                    [Install]
+                    WantedBy=timers.target
+                    EOF_TIMER
+                  fi
+
+                  systemctl daemon-reload || true
+                  systemctl enable --now abcp-b24-garage-sync.timer || true
+                  systemctl status abcp-b24-garage-sync.timer --no-pager || true
+                  REMOTE
+
+            - name: Trigger one manual run (optional smoke check)
+              run: |
+                  ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "systemctl start abcp-b24-garage-sync.service || true"
