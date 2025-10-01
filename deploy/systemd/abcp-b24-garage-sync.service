@@ -8,8 +8,12 @@ Type=oneshot
 User=deploy
 Group=deploy
 WorkingDirectory=/opt/abcp-b24-garage-sync/current
+EnvironmentFile=-/opt/abcp-b24-garage-sync/.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/abcp-b24-garage-sync/current/bin/sync.sh
+Environment=ABCP_B24_ENV_FILE=/opt/abcp-b24-garage-sync/.env
+Environment=ABCP_B24_DATA_DIR=/opt/abcp-b24-garage-sync/data
+Environment=LOG_DIR=/opt/abcp-b24-garage-sync/logs
+ExecStart=/opt/abcp-b24-garage-sync/venv/bin/python -m abcp_b24_garage_sync
 # защита от убийства при перезапусках демонов
 KillSignal=SIGINT
 TimeoutStartSec=900
