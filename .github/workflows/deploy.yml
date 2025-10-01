@@ -1,0 +1,82 @@
+name: Deploy
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Lint (quick)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m compileall -q abcp_b24_garage_sync
+
+      - name: Add SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Rsync project to server
+        run: |
+          rsync -az --delete \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude ".env" \
+            --exclude "__pycache__" \
+            ./ ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/current/
+
+      - name: Ensure directories and permissions
+        run: |
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "\
+            mkdir -p ${DEPLOY_PATH}/data && \
+            test -f ${DEPLOY_PATH}/.env || (cp ${DEPLOY_PATH}/current/.env.example ${DEPLOY_PATH}/.env && echo '!!! Fill .env on server !!!'); \
+            chown -R $USER:$USER ${DEPLOY_PATH} \
+          "
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+
+      - name: Install deps + prime venv + one dry run (optional)
+        run: |
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "\
+            cd ${DEPLOY_PATH}/current && \
+            bash -lc ' \
+              if [[ ! -d ${DEPLOY_PATH}/venv ]]; then python3 -m venv ${DEPLOY_PATH}/venv; fi; \
+              source ${DEPLOY_PATH}/venv/bin/activate; \
+              pip -q install --upgrade pip wheel; \
+              pip -q install -r requirements.txt; \
+              echo OK \
+            ' \
+          "
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+
+      - name: Install/Reload systemd units and enable timer
+        run: |
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "\
+            bash ${DEPLOY_PATH}/current/deploy/remote_bootstrap.sh || true; \
+            sudo systemctl daemon-reload; \
+            sudo systemctl restart abcp-b24-garage-sync.timer; \
+          "
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+
+      - name: Trigger one manual run (optional smoke check)
+        run: |
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "sudo systemctl start abcp-b24-garage-sync.service || true"

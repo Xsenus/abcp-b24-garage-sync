@@ -1,0 +1,23 @@
+[Unit]
+Description=ABCP -> Bitrix24 Garage Sync (one-shot)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/abcp-b24-garage-sync/current
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/abcp-b24-garage-sync/current/bin/sync.sh
+# защита от убийства при перезапусках демонов
+KillSignal=SIGINT
+TimeoutStartSec=900
+
+# Доступ к файлам/логам
+ReadOnlyPaths=/
+ReadWritePaths=/opt/abcp-b24-garage-sync
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

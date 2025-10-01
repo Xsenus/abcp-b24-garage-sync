@@ -1,0 +1,15 @@
+
+[Unit]
+Description=ABCP -> Bitrix24 Garage Sync
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/abcp-b24-garage-sync
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/abcp-b24-garage-sync/.venv/bin/python -m abcp_b24_garage_sync --from 2020-01-01 --to 2025-12-31
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
