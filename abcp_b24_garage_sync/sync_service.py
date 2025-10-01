@@ -44,10 +44,27 @@ def _build_update_fields(row) -> Dict[str, Any]:
     Логируем принятие каждого решения: какой UF-код, что в значении, и почему мог быть пропуск.
     """
     fields: Dict[str, Any] = {}
-    for abcp_key, env_name in BITRIX_FIELD_ENV_MAP.items():
-        uf_code = getenv(env_name, "")
-        if not uf_code:
-            log.debug("BUILD: skip abcp_key=%s (env %s not set -> no UF code)", abcp_key, env_name)
+    for abcp_key, env_names in BITRIX_FIELD_ENV_MAP.items():
+        if isinstance(env_names, str):
+            env_candidates = (env_names,)
+        else:
+            env_candidates = tuple(env_names)
+
+        resolved_codes = []
+        missing_envs = []
+        for env_name in env_candidates:
+            candidate = (getenv(env_name, "") or "").strip()
+            if candidate:
+                resolved_codes.append((env_name, candidate))
+            else:
+                missing_envs.append(env_name)
+
+        if not resolved_codes:
+            log.debug(
+                "BUILD: skip abcp_key=%s (envs %s not set -> no UF code)",
+                abcp_key,
+                env_candidates,
+            )
             continue
 
         value = row[abcp_key]
@@ -57,7 +74,8 @@ def _build_update_fields(row) -> Dict[str, Any]:
         if not allow_overwrite and value in (None, "", 0):
             log.debug(
                 "BUILD: skip abcp_key=%s -> UF=%s (overwrite=False and new value is empty)",
-                abcp_key, uf_code
+                abcp_key,
+                [code for _, code in resolved_codes],
             )
             continue
 
@@ -67,12 +85,23 @@ def _build_update_fields(row) -> Dict[str, Any]:
 
         # Bitrix любит строки — приводим к строке, пустое -> ""
         prepared = "" if value is None else str(value)
-        fields[uf_code] = prepared
+        for env_name, uf_code in resolved_codes:
+            fields[uf_code] = prepared
+            log.debug(
+                "BUILD: set UF=%s (from abcp_key=%s, env=%s, overwrite=%s) value_preview=%s",
+                uf_code,
+                abcp_key,
+                env_name,
+                allow_overwrite,
+                _preview(prepared),
+            )
 
-        log.debug(
-            "BUILD: set UF=%s (from abcp_key=%s, overwrite=%s) value_preview=%s",
-            uf_code, abcp_key, allow_overwrite, _preview(prepared)
-        )
+        if missing_envs:
+            log.debug(
+                "BUILD: abcp_key=%s -> envs without value=%s",
+                abcp_key,
+                missing_envs,
+            )
     log.debug("BUILD: total UF fields prepared=%s", len(fields))
     return fields
 
