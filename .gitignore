@@ -1,12 +1,15 @@
-
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 *.egg-info/
 .venv/
+venv/
 .env
 .env.*
 logs/
+data/
 .DS_Store
 Thumbs.db
+.idea/
+.vscode/

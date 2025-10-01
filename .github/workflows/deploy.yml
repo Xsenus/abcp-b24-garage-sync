@@ -33,6 +33,13 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
 
+      - name: Prepare remote folders
+        run: |
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "\
+            mkdir -p '${{ secrets.DEPLOY_PATH }}'/current '${{ secrets.DEPLOY_PATH }}'/shared '${{ secrets.DEPLOY_PATH }}'/data && \
+            (command -v rsync >/dev/null || (apt-get update -y && apt-get install -y rsync || yum install -y rsync || true)) \
+          "
+
       - name: Rsync project to server
         run: |
           rsync -az --delete \
@@ -40,42 +47,58 @@ jobs:
             --exclude ".github" \
             --exclude ".env" \
             --exclude "__pycache__" \
+            --rsync-path="mkdir -p '${{ secrets.DEPLOY_PATH }}'/current && rsync" \
             ./ ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ secrets.DEPLOY_PATH }}/current/
 
-      - name: Ensure directories and permissions
+      - name: Ensure .env and permissions
         run: |
-          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "\
-            mkdir -p ${DEPLOY_PATH}/data && \
-            test -f ${DEPLOY_PATH}/.env || (cp ${DEPLOY_PATH}/current/.env.example ${DEPLOY_PATH}/.env && echo '!!! Fill .env on server !!!'); \
-            chown -R $USER:$USER ${DEPLOY_PATH} \
-          "
-        env:
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} bash -se <<'REMOTE'
+          set -euo pipefail
+          DEPLOY_PATH='${{ secrets.DEPLOY_PATH }}'
 
-      - name: Install deps + prime venv + one dry run (optional)
+          mkdir -p "$DEPLOY_PATH/data" "$DEPLOY_PATH/current"
+
+          if [ ! -f "$DEPLOY_PATH/.env" ]; then
+            if [ -f "$DEPLOY_PATH/current/.env.example" ]; then
+              cp "$DEPLOY_PATH/current/.env.example" "$DEPLOY_PATH/.env"
+              echo "!!! Fill .env on server: $DEPLOY_PATH/.env"
+            else
+              echo "# .env created by CI — fill values" > "$DEPLOY_PATH/.env"
+              echo "!!! Created empty .env (no .env.example in repo)"
+            fi
+          fi
+
+          chown -R '${{ secrets.DEPLOY_USER }}':'${{ secrets.DEPLOY_USER }}' "$DEPLOY_PATH" || true
+          REMOTE
+
+      - name: Install deps + prime venv
         run: |
-          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "\
-            cd ${DEPLOY_PATH}/current && \
-            bash -lc ' \
-              if [[ ! -d ${DEPLOY_PATH}/venv ]]; then python3 -m venv ${DEPLOY_PATH}/venv; fi; \
-              source ${DEPLOY_PATH}/venv/bin/activate; \
-              pip -q install --upgrade pip wheel; \
-              pip -q install -r requirements.txt; \
-              echo OK \
-            ' \
-          "
-        env:
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} bash -se <<'REMOTE'
+          set -euo pipefail
+          DEPLOY_PATH='${{ secrets.DEPLOY_PATH }}'
+          VENV="$DEPLOY_PATH/venv"
+
+          if [ ! -d "$VENV" ]; then
+            python3 -m venv "$VENV"
+          fi
+
+          . "$VENV/bin/activate"
+          pip -q install --upgrade pip wheel
+          pip -q install -r "$DEPLOY_PATH/current/requirements.txt"
+          echo "venv ready"
+          REMOTE
 
       - name: Install/Reload systemd units and enable timer
         run: |
-          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} "\
-            bash ${DEPLOY_PATH}/current/deploy/remote_bootstrap.sh || true; \
-            sudo systemctl daemon-reload; \
-            sudo systemctl restart abcp-b24-garage-sync.timer; \
-          "
-        env:
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} bash -se <<'REMOTE'
+          set -euo pipefail
+          DEPLOY_PATH='${{ secrets.DEPLOY_PATH }}'
+
+          bash "$DEPLOY_PATH/current/deploy/remote_bootstrap.sh" || true
+          sudo systemctl daemon-reload || true
+          sudo systemctl enable --now abcp-b24-garage-sync.timer || true
+          systemctl status abcp-b24-garage-sync.timer --no-pager || true
+          REMOTE
 
       - name: Trigger one manual run (optional smoke check)
         run: |
