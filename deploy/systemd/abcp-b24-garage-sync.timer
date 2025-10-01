@@ -2,7 +2,7 @@
 Description=Run ABCP -> Bitrix24 Garage Sync periodically
 
 [Timer]
-OnCalendar=*:0/30      # каждые 10 минут
+OnCalendar=*:0/30      # каждые 30 минут
 AccuracySec=1min
 Persistent=true        # если пропуск — запустит при старте
 

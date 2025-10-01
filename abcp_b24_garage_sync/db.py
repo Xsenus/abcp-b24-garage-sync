@@ -1,15 +1,48 @@
 from __future__ import annotations
 
-import sqlite3
 import json
 import logging
+import os
+import sqlite3
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict
 
 from .config import SQLITE_PATH
 
 # Модульный логгер для БД
 log = logging.getLogger("db")
+
+
+def _project_root() -> Path:
+    env_value = os.getenv("ABCP_B24_PROJECT_ROOT")
+    if env_value:
+        try:
+            return Path(env_value).expanduser()
+        except Exception:
+            pass
+    return Path(__file__).resolve().parents[1]
+
+
+def _data_root() -> Path:
+    env_value = os.getenv("ABCP_B24_DATA_DIR") or os.getenv("ABC_B24_DATA_DIR")
+    if env_value:
+        try:
+            return Path(env_value).expanduser()
+        except Exception:
+            pass
+    return _project_root()
+
+
+def _resolve_db_path(raw_path: str) -> Path:
+    """Return an absolute path for the SQLite file and ensure parent dir exists."""
+
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = _data_root() / candidate
+
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    return candidate
 
 DDL = '''
 CREATE TABLE IF NOT EXISTS garage (
@@ -79,8 +112,9 @@ def _preview(value: Any, maxlen: int = 160) -> str:
 
 def connect() -> sqlite3.Connection:
     """Открывает соединение к SQLite и включает Row-фабрику."""
-    log.debug("DB connect: path=%s", SQLITE_PATH)
-    conn = sqlite3.connect(SQLITE_PATH)
+    db_path = _resolve_db_path(SQLITE_PATH)
+    log.debug("DB connect: path=%s", db_path)
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     # Включим foreign keys на всякий (для будущих расширений)
     try:

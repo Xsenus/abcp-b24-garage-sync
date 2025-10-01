@@ -8,11 +8,34 @@ if __name__ == "__main__" and (__package__ is None or __package__ == ""):  # е�
     __package__ = "abcp_b24_garage_sync"                              # указываем имя пакета для корректных относительных импортов
 # -----------------------------------------------------------
 
-import argparse, logging, sys                 # argparse — парсинг аргументов CLI; logging — логирование; sys — доступ к argv
+import argparse, logging, os, sys             # argparse — парсинг аргументов CLI; logging — логирование; sys — доступ к argv
 from pathlib import Path                      # Path — удобная работа с путями
 from datetime import datetime                 # datetime — парсинг и форматирование дат
 from dotenv import load_dotenv                # загрузка переменных окружения из .env
 from .log_setup import setup_logging          # наша настройка логирования (консоль + файл)
+
+
+def _discover_env_file(project_root: Path) -> Path | None:
+    """Return the first existing .env candidate for the current deployment."""
+
+    candidates: list[Path] = []
+
+    override = os.getenv("ABCP_B24_ENV_FILE") or os.getenv("ABC_B24_ENV_FILE")
+    if override:
+        candidates.append(Path(override).expanduser())
+
+    candidates.append(project_root / ".env")
+    candidates.append(project_root.parent / ".env")
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.is_file():
+            return candidate
+
+    return None
 
 def parse_dt(s: str) -> datetime:
     """Разбираем дату из строки: поддерживаем ISO с временем и просто YYYY-MM-DD."""
@@ -31,8 +54,16 @@ def main(argv=None):
 
     # грузим .env из корня проекта (на уровень выше пакета)
     project_root = Path(__file__).resolve().parents[1]          # вычисляем корень проекта
-    env_path = project_root / ".env"                             # путь к .env
-    load_dotenv(dotenv_path=env_path)                            # загружаем .env (если нет — просто ничего не произойдёт)
+    os.environ.setdefault("ABCP_B24_PROJECT_ROOT", str(project_root))
+
+    env_path = _discover_env_file(project_root)
+    if env_path:
+        load_dotenv(dotenv_path=env_path)                        # загружаем .env из найденного места
+    else:
+        # Пробуем стандартный путь, даже если файла нет — load_dotenv тихо вернёт False
+        fallback_env = project_root / ".env"
+        load_dotenv(dotenv_path=fallback_env)
+        env_path = fallback_env if fallback_env.exists() else None
 
     setup_logging()                                              # настраиваем логирование (уровень берётся из LOG_LEVEL)
     log = logging.getLogger("main")                              # получаем модульный логгер
@@ -56,7 +87,10 @@ def main(argv=None):
 
     # фиксируем в логах эффективные аргументы запуска и путь к .env
     log.info("=== ABCP→B24 garage sync: start ===")              # шапка запуска
-    log.info("Using .env at: %s (exists=%s)", env_path, env_path.exists())  # где взяли .env и существует ли он
+    if env_path is not None:
+        log.info("Using .env at: %s (exists=%s)", env_path, env_path.exists())  # где взяли .env и существует ли он
+    else:
+        log.warning(".env file not found (searched in project and parent directories)")
     log.info("CLI argv (effective): %s", argv if argv else sys.argv[1:])    # что именно будет парситься argparse'ом
 
     # imports после загрузки .env — чтобы модули увидели переменные окружения
