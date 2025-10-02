@@ -1,34 +1,79 @@
-
 from __future__ import annotations
 import os, json
+from typing import Dict, Tuple, Optional
 
-BOOL_TRUE = {"1","true","yes","y","on","да","истина"}
+# ---------- helpers ----------
+
+_TRUTHY = {"1","true","yes","y","on","да","истина","ok"}
+_FALSY  = {"0","false","no","n","off","нет","ложь"}
+
+def getenv_str(name: str, default: Optional[str]=None, *, strip: bool=True, empty_to_none: bool=True) -> Optional[str]:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    v = v.strip() if strip else v
+    if empty_to_none and v == "":
+        return None if default is None else default
+    return v
 
 def getenv_bool(name: str, default: bool=False) -> bool:
     v = os.getenv(name)
     if v is None:
         return default
-    return str(v).strip().lower() in BOOL_TRUE
+    s = v.strip().lower()
+    if s in _TRUTHY: return True
+    if s in _FALSY:  return False
+    try:
+        return bool(int(s))
+    except Exception:
+        return default
 
 def getenv_float(name: str, default: float) -> float:
     v = os.getenv(name)
-    return float(v) if v is not None else default
+    if v is None: return default
+    s = v.strip().replace(",", ".")
+    try:
+        return float(s)
+    except Exception:
+        return default
 
-ABCP_BASE_URL = os.getenv("ABCP_BASE_URL", "https://abcp61741.public.api.abcp.ru/cp/garage/")
-ABCP_USERLOGIN = os.getenv("ABCP_USERLOGIN")
-ABCP_USERPSW   = os.getenv("ABCP_USERPSW")
-ABCP_LIMIT     = int(os.getenv("ABCP_LIMIT", "500"))
+def getenv_int(name: str, default: int) -> int:
+    v = os.getenv(name)
+    if v is None: return default
+    try:
+        return int(v.strip())
+    except Exception:
+        return default
 
-B24_WEBHOOK_URL = os.getenv("B24_WEBHOOK_URL")
-B24_DEAL_CATEGORY_ID_USERS = int(os.getenv("B24_DEAL_CATEGORY_ID_USERS", "0"))
-B24_DEAL_TITLE_PREFIX = os.getenv("B24_DEAL_TITLE_PREFIX", "ABCP Регистрация:")
-UF_B24_DEAL_ABCP_USER_ID = os.getenv("UF_B24_DEAL_ABCP_USER_ID")
+def getenv_json(name: str, default):
+    v = os.getenv(name)
+    if v is None: return default
+    try:
+        return json.loads(v)
+    except Exception:
+        return default
 
-# BITRIX_FIELD_ENV_MAP может содержать один или несколько env-переменных для каждого поля.
-# Каждая непустая переменная будет использована как отдельный UF-код, поэтому можно
-# синхронизировать одно и то же значение в несколько полей. При отсутствии первых кодов
-# значение автоматически отправится в доступные «fallback»-поля.
-BITRIX_FIELD_ENV_MAP: dict[str, tuple[str, ...]] = {
+# ---------- ABCP ----------
+
+ABCP_BASE_URL = getenv_str("ABCP_BASE_URL", "https://abcp61741.public.api.abcp.ru/cp/garage/") or "https://abcp61741.public.api.abcp.ru/cp/garage/"
+ABCP_USERLOGIN = getenv_str("ABCP_USERLOGIN")
+ABCP_USERPSW   = getenv_str("ABCP_USERPSW")
+ABCP_LIMIT     = getenv_int("ABCP_LIMIT", 500)
+
+# ---------- Bitrix24 ----------
+
+_raw_b24 = getenv_str("B24_WEBHOOK_URL", "")
+B24_WEBHOOK_URL = (_raw_b24.rstrip("/") + "/") if _raw_b24 else ""
+
+B24_DEAL_CATEGORY_ID_USERS = getenv_int("B24_DEAL_CATEGORY_ID_USERS", 0)
+B24_DEAL_TITLE_PREFIX      = getenv_str("B24_DEAL_TITLE_PREFIX", "ABCP Регистрация:") or "ABCP Регистрация:"
+UF_B24_DEAL_ABCP_USER_ID   = getenv_str("UF_B24_DEAL_ABCP_USER_ID")
+
+# Для нормализации datetime в UF
+B24_TZ_OFFSET = getenv_str("B24_TZ_OFFSET", "+03:00") or "+03:00"
+
+# Привязка ABCP-полей к env-именам с UF-кодами
+BITRIX_FIELD_ENV_MAP: Dict[str, Tuple[str, ...]] = {
     "id":               ("UF_B24_DEAL_GARAGE_ID",),
     "userId":           ("UF_B24_DEAL_GARAGE_USER_ID", "UF_B24_DEAL_ABCP_USER_ID"),
     "name":             ("UF_B24_DEAL_GARAGE_NAME",),
@@ -47,18 +92,27 @@ BITRIX_FIELD_ENV_MAP: dict[str, tuple[str, ...]] = {
     "vehicleRegPlate":  ("UF_B24_DEAL_GARAGE_VEHICLE_REG_PLATE",),
 }
 
-SQLITE_PATH = os.getenv("SQLITE_PATH", "abcp_b24.s3db")
+# ---------- Storage ----------
+SQLITE_PATH = getenv_str("SQLITE_PATH", "abcp_b24.s3db") or "abcp_b24.s3db"
 
-REQUESTS_TIMEOUT = int(os.getenv("REQUESTS_TIMEOUT", "20"))
-REQUESTS_RETRIES = int(os.getenv("REQUESTS_RETRIES", "3"))
-REQUESTS_RETRY_BACKOFF = float(os.getenv("REQUESTS_RETRY_BACKOFF", "1.5"))
-RATE_LIMIT_SLEEP = float(os.getenv("RATE_LIMIT_SLEEP", "0.2"))
+# ---------- HTTP / Limits ----------
+REQUESTS_TIMEOUT        = getenv_int("REQUESTS_TIMEOUT", 20)
+REQUESTS_RETRIES        = getenv_int("REQUESTS_RETRIES", 3)
+REQUESTS_RETRY_BACKOFF  = getenv_float("REQUESTS_RETRY_BACKOFF", 1.5)
+RATE_LIMIT_SLEEP        = getenv_float("RATE_LIMIT_SLEEP", 0.2)
 
+# ---------- Sync behavior ----------
 SYNC_OVERWRITE_DEFAULT = getenv_bool("SYNC_OVERWRITE_DEFAULT", True)
-try:
-    SYNC_OVERWRITE_FIELDS: dict[str,bool] = {k: bool(v) for k,v in json.loads(os.getenv("SYNC_OVERWRITE_FIELDS","{}")).items()}
-except Exception:
-    SYNC_OVERWRITE_FIELDS = {}
+SYNC_OVERWRITE_FIELDS: Dict[str, bool] = {}
+_tmp = getenv_json("SYNC_OVERWRITE_FIELDS", {})
+if isinstance(_tmp, dict):
+    for k, v in _tmp.items():
+        try:
+            SYNC_OVERWRITE_FIELDS[str(k)] = bool(v)
+        except Exception:
+            pass
 
 SYNC_PAUSE_BETWEEN_USERS = getenv_float("SYNC_PAUSE_BETWEEN_USERS", 0.0)
 SYNC_PAUSE_BETWEEN_DEALS = getenv_float("SYNC_PAUSE_BETWEEN_DEALS", 0.0)
+
+LOG_LEVEL = getenv_str("LOG_LEVEL", "INFO") or "INFO"
