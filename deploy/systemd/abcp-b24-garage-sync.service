@@ -1,22 +1,22 @@
 [Unit]
-Description=ABCP -> Bitrix24 Garage Sync (one-shot)
+Description=ABCP -> Bitrix24 Garage Sync (loop service)
 Wants=network-online.target
 After=network-online.target
 
 [Service]
-Type=oneshot
+Type=simple
 User=deploy
 Group=deploy
 WorkingDirectory=/opt/abcp-b24-garage-sync/current
-EnvironmentFile=-/opt/abcp-b24-garage-sync/.env
 Environment=PYTHONUNBUFFERED=1
-Environment=ABCP_B24_ENV_FILE=/opt/abcp-b24-garage-sync/.env
 Environment=ABCP_B24_DATA_DIR=/opt/abcp-b24-garage-sync/data
 Environment=LOG_DIR=/opt/abcp-b24-garage-sync/logs
-ExecStart=/opt/abcp-b24-garage-sync/venv/bin/python -m abcp_b24_garage_sync
+ExecStart=/opt/abcp-b24-garage-sync/venv/bin/python -m abcp_b24_garage_sync --loop-every 30
 # защита от убийства при перезапусках демонов
 KillSignal=SIGINT
 TimeoutStartSec=900
+Restart=on-failure
+RestartSec=60
 
 # Доступ к файлам/логам
 ReadOnlyPaths=/
