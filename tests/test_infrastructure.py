@@ -76,5 +76,30 @@ class DiscoverEnvFileTests(unittest.TestCase):
             self.assertIsNone(discovered)
 
 
+class LoopModeTests(unittest.TestCase):
+    def test_loop_respects_limit_env(self) -> None:
+        env = {"ABCP_B24_LOOP_LIMIT": "2"}
+        with mock.patch.dict(os.environ, env, clear=False):
+            with mock.patch("abcp_b24_garage_sync.main._execute_sync") as execute_mock, \
+                 mock.patch("abcp_b24_garage_sync.main.time.sleep") as sleep_mock:
+                cli_main.main(["--from", "2024-01-01", "--to", "2024-01-02", "--loop-every", "1"])
+
+        self.assertEqual(execute_mock.call_count, 2)
+        self.assertEqual(sleep_mock.call_count, 1)
+
+    def test_loop_defaults_period_when_missing(self) -> None:
+        env = {"ABCP_B24_LOOP_LIMIT": "1"}
+        with mock.patch.dict(os.environ, env, clear=False):
+            with mock.patch("abcp_b24_garage_sync.main._execute_sync") as execute_mock:
+                cli_main.main(["--loop-every", "30"])
+
+        execute_mock.assert_called_once()
+        args, _ = execute_mock.call_args
+        parsed_args = args[0]
+        self.assertEqual(parsed_args.date_from, "2024-01-01")
+        self.assertEqual(parsed_args.date_to, "2025-12-31")
+        self.assertTrue(getattr(parsed_args, "auto_period", False))
+
+
 if __name__ == "__main__":
     unittest.main()

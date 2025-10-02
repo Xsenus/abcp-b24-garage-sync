@@ -8,7 +8,7 @@ if __name__ == "__main__" and (__package__ is None or __package__ == ""):  # е�
     __package__ = "abcp_b24_garage_sync"                              # указываем имя пакета для корректных относительных импортов
 # -----------------------------------------------------------
 
-import argparse, logging, os, sys             # argparse — парсинг аргументов CLI; logging — логирование; sys — доступ к argv
+import argparse, logging, os, sys, time       # argparse — парсинг аргументов CLI; logging — логирование; sys/time — доступ к argv и паузы
 from pathlib import Path                      # Path — удобная работа с путями
 from datetime import datetime                 # datetime — парсинг и форматирование дат
 from dotenv import load_dotenv                # загрузка переменных окружения из .env
@@ -43,70 +43,25 @@ def parse_dt(s: str) -> datetime:
         return datetime.fromisoformat(s)       # парсим в datetime
     return datetime.strptime(s, "%Y-%m-%d")    # иначе парсим формат YYYY-MM-DD
 
-def main(argv=None):
-    """Точка входа CLI: загрузка .env, парсинг аргументов, импорт модулей, цикл по годам и синхронизация."""
-    # если запускаем без аргументов — подставляем дефолтный интервал (как просили)
-    if argv is None:                           # если argv не передали извне
-        argv = []                              # используем пустой список
-    if len(argv) == 0 and len(sys.argv) == 1:  # если реально аргументов нет ни в argv, ни в sys.argv
-        argv = ["--from", "2024-01-01", "--to", "2025-12-31"]  # автоподстановка периода по умолчанию
-        # заметьте: этот факт мы явно отлогируем ниже, после инициализации логгера
 
-    # грузим .env из корня проекта (на уровень выше пакета)
-    project_root = Path(__file__).resolve().parents[1]          # вычисляем корень проекта
-    os.environ.setdefault("ABCP_B24_PROJECT_ROOT", str(project_root))
+def _execute_sync(a, log: logging.Logger, env_path: Path | None, effective_argv: list[str] | tuple[str, ...]) -> None:
+    """Выполняет одну итерацию синхронизации, не заботясь о циклах systemd."""
 
-    env_path = _discover_env_file(project_root)
-    if env_path:
-        load_dotenv(dotenv_path=env_path)                        # загружаем .env из найденного места
-    else:
-        # Пробуем стандартный путь, даже если файла нет — load_dotenv тихо вернёт False
-        fallback_env = project_root / ".env"
-        load_dotenv(dotenv_path=fallback_env)
-        env_path = fallback_env if fallback_env.exists() else None
-
-    setup_logging()                                              # настраиваем логирование (уровень берётся из LOG_LEVEL)
-    log = logging.getLogger("main")                              # получаем модульный логгер
-
-# --- мягкие сигналы завершения ---
-    def _graceful_exit(signum=None, frame=None):
-        signame = {getattr(signal, "SIGINT", 2): "SIGINT",
-                   getattr(signal, "SIGTERM", 15): "SIGTERM"}.get(signum, str(signum))
-        log.warning("Received %s — graceful shutdown", signame)
-        sys.exit(0)
-
-    # SIGINT (Ctrl+C) и SIGTERM (останов от ОС/сервиса)
-    try:
-        signal.signal(signal.SIGINT, _graceful_exit)
-        if hasattr(signal, "SIGTERM"):
-            signal.signal(signal.SIGTERM, _graceful_exit)
-    except Exception:
-        # на некоторых платформах/рантаймах сигналов может не быть
-        log.debug("Signal handlers not installed", exc_info=True)
-    # --- конец блока сигналов ---
-
-    # фиксируем в логах эффективные аргументы запуска и путь к .env
-    log.info("=== ABCP→B24 garage sync: start ===")              # шапка запуска
+    log.info("=== ABCP→B24 garage sync: start ===")
     if env_path is not None:
-        log.info("Using .env at: %s (exists=%s)", env_path, env_path.exists())  # где взяли .env и существует ли он
+        log.info("Using .env at: %s (exists=%s)", env_path, env_path.exists())
     else:
         log.warning(".env file not found (searched in project and parent directories)")
-    log.info("CLI argv (effective): %s", argv if argv else sys.argv[1:])    # что именно будет парситься argparse'ом
+    raw_cli = list(effective_argv)
+    log.info("CLI argv (raw): %s", raw_cli)
+    if getattr(a, "auto_period", False):
+        log.info("CLI period auto-filled: --from=%s --to=%s", a.date_from, a.date_to)
 
     # imports после загрузки .env — чтобы модули увидели переменные окружения
     from .db import init_db, store_payload                       # функции работы с БД (инициализация и запись)
     from .abcp_client import fetch_garage                        # клиент ABCP (забор данных по годам)
     from .sync_service import sync_all                           # сервис синхронизации с Bitrix24
     from .util import slice_by_years                             # разбиение заданного интервала на годовые срезы
-
-    # описываем CLI и парсим аргументы
-    p = argparse.ArgumentParser(description="ABCP→B24 garage sync")  # создаём парсер с описанием
-    p.add_argument("--from", dest="date_from", required=True)        # обязательный параметр начала периода
-    p.add_argument("--to", dest="date_to", required=True)            # обязательный параметр конца периода
-    p.add_argument("--only-store", action="store_true")              # режим: только записать в БД (без синхронизации)
-    p.add_argument("--only-sync", action="store_true")               # режим: только синхронизация (без запроса ABCP)
-    p.add_argument("--user", dest="only_user", type=int)             # ограничение синхронизации конкретным userId
-    a = p.parse_args(argv)                                           # парсим аргументы (argv уже содержит автодефолт, если надо)
 
     # логируем разобранные аргументы
     log.info("Args parsed: from=%s to=%s only_store=%s only_sync=%s user=%s",
@@ -158,6 +113,100 @@ def main(argv=None):
 
     # финал: красивая подпись
     log.info("=== ABCP→B24 garage sync: done ===")                   # конец работы
+
+def main(argv=None):
+    """Точка входа CLI: загрузка .env, парсинг аргументов, импорт модулей, цикл по годам и синхронизация."""
+    # поддерживаем автоподстановку периода, если даты явно не переданы
+    if argv is None:                           # если argv не передали извне
+        argv = list(sys.argv[1:])              # используем реальные аргументы командной строки
+    else:
+        argv = list(argv)                      # создаём копию, чтобы не мутировать входящие данные
+    # грузим .env из корня проекта (на уровень выше пакета)
+    project_root = Path(__file__).resolve().parents[1]          # вычисляем корень проекта
+    os.environ.setdefault("ABCP_B24_PROJECT_ROOT", str(project_root))
+
+    env_path = _discover_env_file(project_root)
+    if env_path:
+        load_dotenv(dotenv_path=env_path)                        # загружаем .env из найденного места
+    else:
+        # Пробуем стандартный путь, даже если файла нет — load_dotenv тихо вернёт False
+        fallback_env = project_root / ".env"
+        load_dotenv(dotenv_path=fallback_env)
+        env_path = fallback_env if fallback_env.exists() else None
+
+    setup_logging()                                              # настраиваем логирование (уровень берётся из LOG_LEVEL)
+    log = logging.getLogger("main")                              # получаем модульный логгер
+
+# --- мягкие сигналы завершения ---
+    def _graceful_exit(signum=None, frame=None):
+        signame = {getattr(signal, "SIGINT", 2): "SIGINT",
+                   getattr(signal, "SIGTERM", 15): "SIGTERM"}.get(signum, str(signum))
+        log.warning("Received %s — graceful shutdown", signame)
+        sys.exit(0)
+
+    # SIGINT (Ctrl+C) и SIGTERM (останов от ОС/сервиса)
+    try:
+        signal.signal(signal.SIGINT, _graceful_exit)
+        if hasattr(signal, "SIGTERM"):
+            signal.signal(signal.SIGTERM, _graceful_exit)
+    except Exception:
+        # на некоторых платформах/рантаймах сигналов может не быть
+        log.debug("Signal handlers not installed", exc_info=True)
+    # --- конец блока сигналов ---
+
+    # описываем CLI и парсим аргументы
+    p = argparse.ArgumentParser(description="ABCP→B24 garage sync")  # создаём парсер с описанием
+    p.add_argument("--from", dest="date_from")                       # начало периода (по умолчанию заполним сами)
+    p.add_argument("--to", dest="date_to")                           # конец периода (по умолчанию заполним сами)
+    p.add_argument("--only-store", action="store_true")              # режим: только записать в БД (без синхронизации)
+    p.add_argument("--only-sync", action="store_true")               # режим: только синхронизация (без запроса ABCP)
+    p.add_argument("--user", dest="only_user", type=int)             # ограничение синхронизации конкретным userId
+    p.add_argument("--loop-every", dest="loop_every", type=int, metavar="MINUTES",
+                   help="Повторять запуск каждые N минут (используется в systemd-сервисе)")
+
+    effective_argv = list(argv)
+    a = p.parse_args(argv)                                           # парсим аргументы (argv уже содержит автодефолт, если надо)
+
+    auto_period = False
+    if a.date_from is None and a.date_to is None:
+        a.date_from = "2024-01-01"
+        a.date_to = "2025-12-31"
+        auto_period = True
+    elif (a.date_from is None) != (a.date_to is None):
+        p.error("--from and --to must be specified together")
+
+    setattr(a, "auto_period", auto_period)
+
+    if a.loop_every is not None and a.loop_every <= 0:
+        p.error("--loop-every must be a positive integer (minutes)")
+
+    loop_every = a.loop_every
+    loop_limit = None
+    loop_limit_env = os.getenv("ABCP_B24_LOOP_LIMIT")
+    if loop_limit_env:
+        try:
+            loop_limit_candidate = int(loop_limit_env)
+            if loop_limit_candidate > 0:
+                loop_limit = loop_limit_candidate
+            else:
+                log.warning("ABCP_B24_LOOP_LIMIT must be > 0, got %r — ignoring", loop_limit_env)
+        except ValueError:
+            log.warning("Invalid ABCP_B24_LOOP_LIMIT=%r — ignoring", loop_limit_env)
+
+    iteration = 0
+    while True:
+        iteration += 1
+        _execute_sync(a, log, env_path, effective_argv)
+
+        if loop_every is None:
+            break
+
+        if loop_limit is not None and iteration >= loop_limit:
+            log.info("Loop limit reached (%s iterations) — exiting", loop_limit)
+            break
+
+        log.info("Sleeping %s minutes before next run", loop_every)
+        time.sleep(loop_every * 60)
 
 
 if __name__ == "__main__":
