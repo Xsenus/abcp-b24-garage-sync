@@ -60,7 +60,10 @@ jobs:
             DEPLOY_PATH='${{ secrets.DEPLOY_PATH }}'; \
             mkdir -p \"\$DEPLOY_PATH/data\" \"\$DEPLOY_PATH/current\" \"\$DEPLOY_PATH/logs\"; \
             if [ ! -f \"\$DEPLOY_PATH/.env\" ]; then \
-              if [ -f \"\$DEPLOY_PATH/current/.env.example\" ]; then \
+              if [ -f \"\$DEPLOY_PATH/current/.env\" ] && [ ! -L \"\$DEPLOY_PATH/current/.env\" ]; then \
+                cp \"\$DEPLOY_PATH/current/.env\" \"\$DEPLOY_PATH/.env\"; \
+                echo '!!! Copied existing current/.env to shared location'; \
+              elif [ -f \"\$DEPLOY_PATH/current/.env.example\" ]; then \
                 cp \"\$DEPLOY_PATH/current/.env.example\" \"\$DEPLOY_PATH/.env\"; \
                 echo '!!! Fill .env on server: '\$DEPLOY_PATH'/.env'; \
               else \
@@ -68,7 +71,11 @@ jobs:
                 echo '!!! Created empty .env (no .env.example in repo)'; \
               fi; \
             fi; \
-            ln -sf \"\$DEPLOY_PATH/.env\" \"\$DEPLOY_PATH/current/.env\"; \
+            if [ -f \"\$DEPLOY_PATH/.env\" ]; then \
+              ln -sf \"\$DEPLOY_PATH/.env\" \"\$DEPLOY_PATH/current/.env\"; \
+            else \
+              echo '!!! WARNING: ${DEPLOY_PATH}/.env is still missing'; \
+            fi; \
             chown -R '${{ secrets.DEPLOY_USER }}':'${{ secrets.DEPLOY_USER }}' \"\$DEPLOY_PATH\" || true \
           "
 
