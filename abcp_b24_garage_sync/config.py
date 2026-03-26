@@ -59,6 +59,8 @@ ABCP_BASE_URL = getenv_str("ABCP_BASE_URL", "https://abcp61741.public.api.abcp.r
 ABCP_USERLOGIN = getenv_str("ABCP_USERLOGIN")
 ABCP_USERPSW   = getenv_str("ABCP_USERPSW")
 ABCP_LIMIT     = getenv_int("ABCP_LIMIT", 500)
+ABCP_INITIAL_LOOKBACK_YEARS = getenv_int("ABCP_INITIAL_LOOKBACK_YEARS", 2)
+ABCP_INCREMENTAL_OVERLAP_MINUTES = getenv_int("ABCP_INCREMENTAL_OVERLAP_MINUTES", 5)
 
 # ---------- Bitrix24 ----------
 
@@ -100,6 +102,9 @@ REQUESTS_TIMEOUT        = getenv_int("REQUESTS_TIMEOUT", 20)
 REQUESTS_RETRIES        = getenv_int("REQUESTS_RETRIES", 3)
 REQUESTS_RETRY_BACKOFF  = getenv_float("REQUESTS_RETRY_BACKOFF", 1.5)
 RATE_LIMIT_SLEEP        = getenv_float("RATE_LIMIT_SLEEP", 0.2)
+B24_VERIFY_UPDATES      = getenv_bool("B24_VERIFY_UPDATES", False)
+B24_USE_BATCH           = getenv_bool("B24_USE_BATCH", True)
+B24_BATCH_SIZE          = getenv_int("B24_BATCH_SIZE", 25)
 
 # ---------- Sync behavior ----------
 SYNC_OVERWRITE_DEFAULT = getenv_bool("SYNC_OVERWRITE_DEFAULT", True)
