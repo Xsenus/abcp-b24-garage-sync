@@ -1,38 +1,124 @@
+# ABCP -> Bitrix24 Garage Sync
 
-# ABCP → Bitrix24 Garage Sync (Python)
+Сервис синхронизирует данные гаража из ABCP в пользовательские поля сделок Bitrix24.
 
-Сервис синхронизации данных «гаража» из ABCP в сделки Bitrix24. Приложение можно запускать разово или в непрерывном режиме через systemd.
+Основной режим работы теперь инкрементальный:
+- если `--from/--to` не указаны, сервис берёт период из локального курсора `fetch_state`
+- при первом автоматическом запуске курсор инициализируется от `1 января` года, рассчитанного по `ABCP_INITIAL_LOOKBACK_YEARS`
+- каждый следующий автоматический запуск дочитывает только новый хвост с overlap `ABCP_INCREMENTAL_OVERLAP_MINUTES`
 
-## Быстрый старт для разработки
+Для полного исторического backfill можно по-прежнему явно передавать `--from` и `--to`.
+
+## Быстрый старт
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate            # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env                  # заполните креды ABCP/B24
-
-# однократный прогон (дату можно не указывать — main.py подставит 2024-01-01..2025-12-31)
-python -m abcp_b24_garage_sync --from 2020-01-01 --to 2025-12-31
-
-# непрерывный режим (повтор каждые 30 минут; период можно не указывать — подставится 2024-01-01..2025-12-31)
-python -m abcp_b24_garage_sync --loop-every 30 --from 2024-01-01 --to 2025-12-31
+cp .env.example .env
 ```
 
-Поддерживаются режимы `--only-store`, `--only-sync`, `--only-sync --user <ID>`.
+Однократный инкрементальный запуск:
 
-## Конфигурация окружения
+```bash
+python -m abcp_b24_garage_sync
+```
 
-* `.env` располагается в каталоге проекта (`current/.env`). Скрипт `deploy/remote_bootstrap.sh` автоматически перенесёт файл из прежнего общего расположения (`/opt/abcp-b24-garage-sync/.env`), если вы использовали старую схему. Путь можно явно указать через переменную `ABCP_B24_ENV_FILE`.
-* `ABCP_B24_DATA_DIR` определяет базовую директорию для базы и логов. По умолчанию — корень проекта. Любые относительные пути (например, `SQLITE_PATH`, `LOG_DIR`) интерпретируются относительно этого каталога.
-* Логи пишутся в консоль и файл (по умолчанию `logs/service.log`, ротация раз в сутки, хранится 7 файлов). Переопределяется переменными `LOG_DIR` и `LOG_FILE`.
+Явный исторический прогон:
 
-См. `.env.example` для подсказок по переменным.
+```bash
+python -m abcp_b24_garage_sync --from 2024-01-01 --to 2026-03-26
+```
 
-## Развёртывание на сервер (systemd)
+Только загрузка из ABCP в локальную SQLite:
 
-1. Скопируйте проект (rsync/git) в `/opt/abcp-b24-garage-sync/current` и создайте Python‑виртуальное окружение в `/opt/abcp-b24-garage-sync/venv`.
-2. Заполните `/opt/abcp-b24-garage-sync/current/.env` (можно создать из `.env.example`).
-3. Установите systemd-юнит из `deploy/systemd/`:
+```bash
+python -m abcp_b24_garage_sync --only-store
+```
+
+Непрерывный режим:
+
+```bash
+python -m abcp_b24_garage_sync --loop-every 30
+```
+
+Поддерживаются режимы:
+- `--only-store`
+- `--only-sync`
+- `--only-sync --user <ID>`
+
+## Что изменилось в логике
+
+Сервис уменьшает количество запросов за счёт нескольких уровней оптимизации:
+- хранит курсор последней успешной загрузки из ABCP в `fetch_state`
+- кэширует `dealId` в `sync_status` и не ищет сделку в Bitrix заново без необходимости
+- сохраняет `sourcePayloadHash` и пропускает Bitrix, если набор полей уже синхронизирован
+- использует batched вызовы Bitrix для поиска сделок, чтения текущих значений и массовых обновлений
+
+Это особенно важно для loop-режима через systemd: повторный запуск больше не перечитывает один и тот же исторический диапазон на каждом цикле.
+
+## Конфигурация
+
+### Где лежит `.env`
+
+Сервис ищет файл окружения в таком порядке:
+1. путь из `ABCP_B24_ENV_FILE`
+2. `<project_root>/.env`
+3. `<project_root>/../.env`
+
+Для production рекомендуется хранить файл в:
+
+```text
+/opt/abcp-b24-garage-sync/current/.env
+```
+
+Скрипт `deploy/remote_bootstrap.sh` при необходимости переносит старый общий файл `/opt/abcp-b24-garage-sync/.env` в новый путь.
+
+### Важные переменные
+
+`ABCP_INITIAL_LOOKBACK_YEARS`
+- сколько лет захватывает первый автоматический запуск, если курсора ещё нет
+
+`ABCP_INCREMENTAL_OVERLAP_MINUTES`
+- overlap между последовательными автоматическими загрузками из ABCP
+
+`ABCP_B24_DATA_DIR`
+- базовая директория для SQLite, fetch state и логов
+
+`B24_USE_BATCH`
+- включает пакетные вызовы Bitrix24
+
+`B24_BATCH_SIZE`
+- размер батча для операций `find/get/update` в Bitrix24
+
+`B24_VERIFY_UPDATES`
+- если `true`, после обновления сервис повторно читает сделку и проверяет, что поля реально применились
+- по умолчанию `false`, чтобы не добавлять лишние запросы
+
+`SYNC_OVERWRITE_FIELDS`
+- точечное управление перезаписью отдельных полей
+- пример: `{"vin": false, "vehicleRegPlate": false}`
+
+Если какой-то `UF_B24_DEAL_*` оставлен пустым, соответствующее поле просто не синхронизируется. Это нормальный способ отключить часть маппинга, например `comment`.
+
+## Хранилище и логи
+
+По умолчанию сервис создаёт:
+- SQLite по пути `SQLITE_PATH` внутри `ABCP_B24_DATA_DIR`
+- лог-файл `LOG_FILE` внутри `LOG_DIR`
+
+В базе используются таблицы:
+- `garage` — последние данные из ABCP
+- `sync_status` — текущее состояние синка по пользователю
+- `sync_audit` — аудит всех попыток синка
+- `fetch_state` — курсор инкрементальной загрузки из ABCP
+
+## Развёртывание на сервере
+
+1. Скопируйте проект в `/opt/abcp-b24-garage-sync/current`.
+2. Создайте виртуальное окружение в `/opt/abcp-b24-garage-sync/venv`.
+3. Заполните `/opt/abcp-b24-garage-sync/current/.env`.
+4. Установите сервис:
 
 ```bash
 sudo cp deploy/systemd/abcp-b24-garage-sync.service /etc/systemd/system/
@@ -40,13 +126,49 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now abcp-b24-garage-sync.service
 ```
 
-Сервис запускает `python -m abcp_b24_garage_sync --loop-every 30` из виртуального окружения и ожидает, что зависимости уже установлены (`pip install -r requirements.txt`). Повторный запуск выполняется каждые 30 минут внутри одного процесса, поэтому `systemctl stop abcp-b24-garage-sync.service` действительно останавливает синхронизацию и больше не будет перезапускать её таймер.
-
-Для разового запуска:
+Или используйте bootstrap-скрипт:
 
 ```bash
-sudo systemctl start abcp-b24-garage-sync.service
+sudo bash deploy/remote_bootstrap.sh
+```
+
+Сервис запускает:
+
+```bash
+python -m abcp_b24_garage_sync --loop-every 30
+```
+
+То есть каждые 30 минут выполняется новый инкрементальный цикл внутри одного процесса.
+
+Полезные команды:
+
+```bash
+sudo systemctl restart abcp-b24-garage-sync.service
+sudo systemctl status abcp-b24-garage-sync.service --no-pager
 journalctl -u abcp-b24-garage-sync.service -f
 ```
 
-Логи также доступны в `${LOG_DIR:-<data_dir>/logs}/service.log`.
+## Примеры безопасной проверки
+
+Проверить только загрузку из ABCP, не трогая Bitrix:
+
+```bash
+python -m abcp_b24_garage_sync --only-store
+```
+
+Проверить работу на одном пользователе:
+
+```bash
+python -m abcp_b24_garage_sync --only-sync --user 123456
+```
+
+Важно: `--only-sync` уже может писать в Bitrix24.
+
+## Скрипты из `scripts/`
+
+Служебные примеры в каталоге `scripts/` тоже переведены на актуальную схему:
+- `run.sh`
+- `run.bat`
+- `abcp-b24-garage-sync.service.example`
+
+Они используют автоматический инкрементальный режим, а не фиксированный исторический диапазон.
