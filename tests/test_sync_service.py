@@ -60,9 +60,68 @@ class BuildUpdateFieldsTests(unittest.TestCase):
 
         self.assertEqual(fields["UF_CODE_ID"], "10")
         self.assertEqual(fields["UF_CODE_USER_1"], "555")
-        # второй код для userId также должен присутствовать
         self.assertEqual(fields["UF_CODE_USER_2"], "555")
         self.assertEqual(fields["UF_CODE_COMMENT"], "note")
+        self.assertEqual(fields["UF_CODE_YEAR"], "2024")
+
+
+class LocalSkipTests(unittest.TestCase):
+    def test_skips_only_when_cached_deal_and_source_match(self) -> None:
+        row = {
+            "id": 123,
+            "dateUpdated": "2026-03-26 12:00:00",
+            "cachedDealId": 456,
+            "cachedSourceGarageId": 123,
+            "cachedSourceDateUpdated": "2026-03-26 12:00:00",
+            "cachedSourcePayloadHash": None,
+            "cachedLastResult": "updated",
+        }
+        self.assertTrue(sync_service._can_skip_remote_sync(row))
+
+    def test_does_not_skip_without_cached_deal(self) -> None:
+        row = {
+            "id": 123,
+            "dateUpdated": "2026-03-26 12:00:00",
+            "cachedDealId": None,
+            "cachedSourceGarageId": 123,
+            "cachedSourceDateUpdated": "2026-03-26 12:00:00",
+            "cachedSourcePayloadHash": None,
+            "cachedLastResult": "updated",
+        }
+        self.assertFalse(sync_service._can_skip_remote_sync(row))
+
+    def test_does_not_skip_after_error(self) -> None:
+        row = {
+            "id": 123,
+            "dateUpdated": "2026-03-26 12:00:00",
+            "cachedDealId": 456,
+            "cachedSourceGarageId": 123,
+            "cachedSourceDateUpdated": "2026-03-26 12:00:00",
+            "cachedSourcePayloadHash": None,
+            "cachedLastResult": "error",
+        }
+        self.assertFalse(sync_service._can_skip_remote_sync(row))
+
+    def test_skips_by_payload_hash_even_when_source_row_changed(self) -> None:
+        payload_hash = "abc123"
+        row = {
+            "id": 999,
+            "dateUpdated": "2026-03-26 12:30:00",
+            "cachedDealId": 456,
+            "cachedSourceGarageId": 123,
+            "cachedSourceDateUpdated": "2026-03-26 12:00:00",
+            "cachedSourcePayloadHash": payload_hash,
+            "cachedLastResult": "updated",
+        }
+        self.assertTrue(sync_service._can_skip_remote_sync(row, payload_hash))
+
+    def test_payload_hash_is_stable_for_same_field_set(self) -> None:
+        fields_a = {"UF_A": "1", "UF_B": "2"}
+        fields_b = {"UF_B": "2", "UF_A": "1"}
+        self.assertEqual(
+            sync_service._stable_payload_hash(fields_a),
+            sync_service._stable_payload_hash(fields_b),
+        )
 
 
 if __name__ == "__main__":
