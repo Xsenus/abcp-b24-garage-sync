@@ -22,6 +22,7 @@ from .config import (
     REQUESTS_TIMEOUT,
     UF_B24_DEAL_ABCP_USER_ID,
 )
+from .request_audit import audit_http_transaction
 
 
 DEFAULT_TZ_OFFSET = B24_TZ_OFFSET
@@ -136,76 +137,114 @@ def _to_bool_y_n(v: Any) -> str:
 
 
 def _call(method: str, params: dict) -> Any:
-    url = f"{B24_WEBHOOK_URL}{method}"
-    masked_url = _mask_url(url)
-
-    logger.debug(
-        "B24 CALL start: method=%s url=%s params=%s",
-        method, masked_url, _preview_json(_safe_params_for_log(params)),
-    )
-
-    r = SESSION.post(url, json=params, timeout=REQUESTS_TIMEOUT)
-    logger.debug("B24 CALL response: status=%s, content_length=%s", r.status_code, len(r.content or b""))
-
-    try:
-        data: Any = r.json()
-    except Exception:
-        snippet = (r.text or "")[:800]
-        logger.error("B24 CALL non-JSON response (snippet): %s", snippet)
-        r.raise_for_status()
-        raise
-
-    if isinstance(data, dict) and "error" in data:
-        logger.error(
-            "B24 CALL API error: method=%s url=%s error=%s description=%s",
-            method, masked_url, data.get("error"), data.get("error_description"),
-        )
-        raise RuntimeError(_preview_json(data))
-
-    logger.debug("B24 CALL ok: method=%s url=%s preview=%s", method, masked_url, _preview_json(data))
-
-    if RATE_LIMIT_SLEEP and RATE_LIMIT_SLEEP > 0:
-        time.sleep(RATE_LIMIT_SLEEP)
-
+    data = _call_api(method, params)
     if isinstance(data, dict) and "result" in data:
         return data["result"]
     return data
 
 
 def _call_full(method: str, params: dict) -> dict:
+    data = _call_api(method, params)
+    if not isinstance(data, dict):
+        return {"result": data}
+    return data
+
+
+def _call_api(method: str, params: dict) -> Any:
     url = f"{B24_WEBHOOK_URL}{method}"
     masked_url = _mask_url(url)
+    started_at = datetime.now().astimezone()
+    started_perf = time.perf_counter()
 
     logger.debug(
-        "B24 CALL FULL start: method=%s url=%s params=%s",
+        "B24 CALL start: method=%s url=%s params=%s",
         method, masked_url, _preview_json(_safe_params_for_log(params)),
     )
 
-    r = SESSION.post(url, json=params, timeout=REQUESTS_TIMEOUT)
-    logger.debug("B24 CALL FULL response: status=%s, content_length=%s", r.status_code, len(r.content or b""))
+    try:
+        r = SESSION.post(url, json=params, timeout=REQUESTS_TIMEOUT)
+    except Exception as exc:
+        audit_http_transaction(
+            service="bitrix24",
+            method="POST",
+            url=masked_url,
+            request_payload=params,
+            started_at=started_at,
+            elapsed_ms=(time.perf_counter() - started_perf) * 1000,
+            ok=False,
+            outcome="transport_error",
+            error=str(exc),
+            meta={"bitrix_method": method},
+        )
+        raise
+
+    logger.debug("B24 CALL response: status=%s, content_length=%s", r.status_code, len(r.content or b""))
 
     try:
         data: Any = r.json()
     except Exception:
         snippet = (r.text or "")[:800]
-        logger.error("B24 CALL FULL non-JSON response (snippet): %s", snippet)
+        audit_http_transaction(
+            service="bitrix24",
+            method="POST",
+            url=masked_url,
+            request_payload=params,
+            started_at=started_at,
+            elapsed_ms=(time.perf_counter() - started_perf) * 1000,
+            status_code=r.status_code,
+            ok=False,
+            outcome="non_json_response",
+            response_body=snippet,
+            response_content_length=len(r.content or b""),
+            error="Response body is not valid JSON",
+            meta={"bitrix_method": method},
+        )
+        logger.error("B24 CALL non-JSON response (snippet): %s", snippet)
         r.raise_for_status()
         raise
 
     if isinstance(data, dict) and "error" in data:
+        audit_http_transaction(
+            service="bitrix24",
+            method="POST",
+            url=masked_url,
+            request_payload=params,
+            started_at=started_at,
+            elapsed_ms=(time.perf_counter() - started_perf) * 1000,
+            status_code=r.status_code,
+            ok=False,
+            outcome="api_error",
+            response_body=data,
+            response_content_length=len(r.content or b""),
+            error=f"{data.get('error')}: {data.get('error_description')}",
+            meta={"bitrix_method": method},
+        )
         logger.error(
-            "B24 CALL FULL API error: method=%s url=%s error=%s description=%s",
+            "B24 CALL API error: method=%s url=%s error=%s description=%s",
             method, masked_url, data.get("error"), data.get("error_description"),
         )
         raise RuntimeError(_preview_json(data))
 
-    logger.debug("B24 CALL FULL ok: method=%s url=%s preview=%s", method, masked_url, _preview_json(data))
+    audit_http_transaction(
+        service="bitrix24",
+        method="POST",
+        url=masked_url,
+        request_payload=params,
+        started_at=started_at,
+        elapsed_ms=(time.perf_counter() - started_perf) * 1000,
+        status_code=r.status_code,
+        ok=r.ok,
+        outcome="success" if r.ok else "http_error",
+        response_body=data,
+        response_content_length=len(r.content or b""),
+        meta={"bitrix_method": method},
+    )
+
+    logger.debug("B24 CALL ok: method=%s url=%s preview=%s", method, masked_url, _preview_json(data))
 
     if RATE_LIMIT_SLEEP and RATE_LIMIT_SLEEP > 0:
         time.sleep(RATE_LIMIT_SLEEP)
 
-    if not isinstance(data, dict):
-        return {"result": data}
     return data
 
 

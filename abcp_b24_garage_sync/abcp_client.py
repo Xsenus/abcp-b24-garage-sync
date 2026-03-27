@@ -3,6 +3,7 @@ from __future__ import annotations  # корректная работа анно
 import time  # пауза между запросами (RATE_LIMIT_SLEEP)
 import json  # компактное и безопасное логирование структур
 import logging  # стандартная система логов
+from datetime import datetime
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse  # чтобы маскировать креды в URL
 import requests  # HTTP-клиент
 from requests.adapters import HTTPAdapter, Retry  # адаптер и стратегия ретраев
@@ -17,6 +18,7 @@ from .config import (
     REQUESTS_RETRY_BACKOFF,   # backoff-фактор между повторами
     RATE_LIMIT_SLEEP,         # пауза между запросами для бережности
 )
+from .request_audit import audit_http_transaction
 
 # Модульный логгер для этого клиента
 logger = logging.getLogger("abcp_client")
@@ -153,7 +155,7 @@ def fetch_garage(start, end) -> dict:
     headers = {"Accept": "application/json"}  # просим JSON
 
     # Логируем старт операции
-    logger.info("ABCP FETCH start: %s → %s", params["dateUpdatedStart"], params["dateUpdatedEnd"])
+    logger.info("ABCP FETCH start: %s -> %s", params["dateUpdatedStart"], params["dateUpdatedEnd"])
     logger.debug("ABCP params (masked in URL): userlogin=user**** userpsw=****")
 
     # Сюда будем собирать диагностику по неуспешным попыткам
@@ -164,9 +166,26 @@ def fetch_garage(start, end) -> dict:
         # Старт запроса — логируем замаскированный URL (креды скрыты)
         masked_url = _mask_url_qs(url + "?" + urlencode({**params}))
         logger.debug("ABCP GET try: %s", masked_url)
+        started_at = datetime.now().astimezone()
+        started_perf = time.perf_counter()
 
         # Делаем запрос
-        r = SESSION.get(url, params=params, headers=headers, timeout=REQUESTS_TIMEOUT)
+        try:
+            r = SESSION.get(url, params=params, headers=headers, timeout=REQUESTS_TIMEOUT)
+        except Exception as exc:
+            audit_http_transaction(
+                service="abcp",
+                method="GET",
+                url=masked_url,
+                request_payload=params,
+                request_headers=headers,
+                started_at=started_at,
+                elapsed_ms=(time.perf_counter() - started_perf) * 1000,
+                ok=False,
+                outcome="transport_error",
+                error=str(exc),
+            )
+            raise
 
         # Логируем базовую информацию об ответе
         logger.debug("ABCP RESP status=%s len=%s url=%s",
@@ -180,12 +199,41 @@ def fetch_garage(start, end) -> dict:
             except Exception:
                 # Если пришёл не JSON — логируем фрагмент и бросаем ошибку статуса
                 snippet = (r.text or "")[:500]
+                audit_http_transaction(
+                    service="abcp",
+                    method="GET",
+                    url=_mask_url_qs(r.url),
+                    request_payload=params,
+                    request_headers=headers,
+                    started_at=started_at,
+                    elapsed_ms=(time.perf_counter() - started_perf) * 1000,
+                    status_code=r.status_code,
+                    ok=False,
+                    outcome="non_json_response",
+                    response_body=snippet,
+                    response_content_length=len(r.content or b""),
+                    error="Response body is not valid JSON",
+                )
                 logger.error("ABCP non-JSON 200 response (snippet): %s", snippet)
                 r.raise_for_status()
                 raise  # теоретически не дойдём, т.к. выше бросит
 
             # Некоторые стенды возвращают 200 с errorCode=301 — тоже трактуем как пусто
             if isinstance(data, dict) and str(data.get("errorCode")) in {"301", "404"}:
+                audit_http_transaction(
+                    service="abcp",
+                    method="GET",
+                    url=_mask_url_qs(r.url),
+                    request_payload=params,
+                    request_headers=headers,
+                    started_at=started_at,
+                    elapsed_ms=(time.perf_counter() - started_perf) * 1000,
+                    status_code=r.status_code,
+                    ok=True,
+                    outcome="empty",
+                    response_body=data,
+                    response_content_length=len(r.content or b""),
+                )
                 logger.info("ABCP FETCH empty (200 with errorCode=%s)", data.get("errorCode"))
                 return {}
 
@@ -203,6 +251,21 @@ def fetch_garage(start, end) -> dict:
             if isinstance(preview, str) and len(preview) > 800:
                 preview = preview[:800] + "...(truncated)"
             logger.debug("ABCP FETCH preview: %s", preview)
+            audit_http_transaction(
+                service="abcp",
+                method="GET",
+                url=_mask_url_qs(r.url),
+                request_payload=params,
+                request_headers=headers,
+                started_at=started_at,
+                elapsed_ms=(time.perf_counter() - started_perf) * 1000,
+                status_code=r.status_code,
+                ok=True,
+                outcome="success",
+                response_body=data,
+                response_content_length=len(r.content or b""),
+                meta={"items": total},
+            )
 
             # Делаем паузу, если настроено, и возвращаем данные
             if RATE_LIMIT_SLEEP and RATE_LIMIT_SLEEP > 0:
@@ -218,11 +281,40 @@ def fetch_garage(start, end) -> dict:
 
         if _is_empty_not_found(r.status_code, data, r.text):
             # Пустой интервал (типично 404 + errorCode=301) — это НЕ ошибка
+            audit_http_transaction(
+                service="abcp",
+                method="GET",
+                url=_mask_url_qs(r.url),
+                request_payload=params,
+                request_headers=headers,
+                started_at=started_at,
+                elapsed_ms=(time.perf_counter() - started_perf) * 1000,
+                status_code=r.status_code,
+                ok=True,
+                outcome="empty",
+                response_body=data if data is not None else (r.text or "")[:500],
+                response_content_length=len(r.content or b""),
+            )
             logger.info("ABCP FETCH empty (status=%s, interval without cars)", r.status_code)
             return {}
 
         # Не пустой и не 200 — собираем сниппет для диагностики и решаем, идти ли дальше
         snippet = (r.text or "")[:500]
+        audit_http_transaction(
+            service="abcp",
+            method="GET",
+            url=_mask_url_qs(r.url),
+            request_payload=params,
+            request_headers=headers,
+            started_at=started_at,
+            elapsed_ms=(time.perf_counter() - started_perf) * 1000,
+            status_code=r.status_code,
+            ok=False,
+            outcome="http_error",
+            response_body=data if data is not None else snippet,
+            response_content_length=len(r.content or b""),
+            error=snippet,
+        )
         logger.warning("ABCP FETCH non-200: status=%s url=%s snippet=%s",
                        r.status_code, _mask_url_qs(r.url), snippet)
         errors.append((r.status_code, r.url, snippet))

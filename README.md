@@ -95,6 +95,10 @@ python -m abcp_b24_garage_sync --loop-every 30
 - если `true`, после обновления сервис повторно читает сделку и проверяет, что поля реально применились
 - по умолчанию `false`, чтобы не добавлять лишние запросы
 
+`REQUEST_AUDIT_ENABLED`
+- если `true`, сервис пишет отдельный JSONL-аудит всех исходящих HTTP-запросов
+- по умолчанию `true`; файл создаётся по дням в `LOG_DIR` с именем `http-requests-YYYY-MM-DD.jsonl`
+
 `SYNC_OVERWRITE_FIELDS`
 - точечное управление перезаписью отдельных полей
 - пример: `{"vin": false, "vehicleRegPlate": false}`
@@ -106,6 +110,7 @@ python -m abcp_b24_garage_sync --loop-every 30
 По умолчанию сервис создаёт:
 - SQLite по пути `SQLITE_PATH` внутри `ABCP_B24_DATA_DIR`
 - лог-файл `LOG_FILE` внутри `LOG_DIR`
+- дневной аудит исходящих HTTP-запросов `http-requests-YYYY-MM-DD.jsonl` внутри `LOG_DIR`
 
 В базе используются таблицы:
 - `garage` — последние данные из ABCP
